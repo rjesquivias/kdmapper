@@ -52,7 +52,7 @@ bool service::RegisterAndStart(const std::wstring& driver_path) {
 	Status = NtLoadDriver(&serviceStr);
 	Log("[+] NtLoadDriver Status 0x" << std::hex << Status << std::endl);
 	
-	//Never should occur since kdmapper checks for "IsRunning" driver before
+	//Never should occur since jolly checks for "IsRunning" driver before
 	if (Status == 0xC000010E) {// STATUS_IMAGE_ALREADY_LOADED
 		return true;
 	}

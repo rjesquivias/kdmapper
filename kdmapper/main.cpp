@@ -5,7 +5,7 @@
 #include <vector>
 #include <filesystem>
 
-#include "kdmapper.hpp"
+#include "jolly.hpp"
 
 HANDLE iqvw64e_device_handle;
 
@@ -20,6 +20,8 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 	if (iqvw64e_device_handle)
 		intel_driver::Unload(iqvw64e_device_handle);
 
+	Log(L"[*] Crash handler" << std::endl);
+	system("pause");
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -38,7 +40,7 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 
 void help() {
 	Log(L"\r\n\r\n[!] Incorrect Usage!" << std::endl);
-	Log(L"[+] Usage: kdmapper.exe [--free][--mdl][--PassAllocationPtr] driver" << std::endl);
+	Log(L"[+] Usage: jolly.exe [--free][--mdl][--PassAllocationPtr] driver" << std::endl);
 }
 
 bool callbackExample(ULONG64* param1, ULONG64* param2, ULONG64 allocationPtr, ULONG64 allocationSize, ULONG64 mdlptr) {
@@ -62,6 +64,12 @@ bool callbackExample(ULONG64* param1, ULONG64* param2, ULONG64 allocationPtr, UL
 
 int wmain(const int argc, wchar_t** argv) {
 	SetUnhandledExceptionFilter(SimplestCrashHandler);
+
+	/*
+	if (!service::StopAndRemove(L"QfRSdsAXDJbWjagG"))
+		return false;
+	return 0;
+	*/
 
 	bool free = paramExists(argc, argv, L"free") > 0;
 	bool mdlMode = paramExists(argc, argv, L"mdl") > 0;
@@ -94,6 +102,7 @@ int wmain(const int argc, wchar_t** argv) {
 
 	if (drvIndex <= 0) {
 		help();
+		system("pause");
 		return -1;
 	}
 
@@ -101,38 +110,55 @@ int wmain(const int argc, wchar_t** argv) {
 
 	if (!std::filesystem::exists(driver_path)) {
 		Log(L"[-] File " << driver_path << L" doesn't exist" << std::endl);
+		system("pause");
 		return -1;
 	}
 
 	iqvw64e_device_handle = intel_driver::Load();
 
-	if (iqvw64e_device_handle == INVALID_HANDLE_VALUE)
+	if (iqvw64e_device_handle == INVALID_HANDLE_VALUE) {
+		Log(L"[-] Intel device handle failure" << std::endl);
+		system("pause");
 		return -1;
+	}
 
 	std::vector<uint8_t> raw_image = { 0 };
 	if (!utils::ReadFileToMemory(driver_path, &raw_image)) {
 		Log(L"[-] Failed to read image to memory" << std::endl);
+		system("pause");
 		intel_driver::Unload(iqvw64e_device_handle);
 		return -1;
 	}
 
-	kdmapper::AllocationMode mode = kdmapper::AllocationMode::AllocatePool;
+	jolly::AllocationMode mode = jolly::AllocationMode::AllocatePool;
 
 	if (mdlMode && indPagesMode) {
 		Log(L"[-] Too many allocation modes" << std::endl);
+		system("pause");
 		intel_driver::Unload(iqvw64e_device_handle);
 		return -1;
 	}
 	else if (mdlMode) {
-		mode = kdmapper::AllocationMode::AllocateMdl;
+		mode = jolly::AllocationMode::AllocateMdl;
 	}
 	else if (indPagesMode) {
-		mode = kdmapper::AllocationMode::AllocateIndependentPages;
+		mode = jolly::AllocationMode::AllocateIndependentPages;
 	}
 
 	NTSTATUS exitCode = 0;
-	if (!kdmapper::MapDriver(iqvw64e_device_handle, raw_image.data(), 0, 0, free, true, mode, passAllocationPtr, callbackExample, &exitCode)) {
+	uintptr_t baseAddress;
+	if (!jolly::MapDriver(iqvw64e_device_handle, raw_image.data(), 0, 0, free, true, mode, passAllocationPtr, callbackExample, &exitCode, &baseAddress)) {
 		Log(L"[-] Failed to map " << driver_path << std::endl);
+		system("pause");
+		intel_driver::Unload(iqvw64e_device_handle);
+		return -1;
+	}
+
+	Log(L"[+] Base Address " << std::hex << baseAddress << std::endl);
+
+	if (!intel_driver::ClearBigPoolData(iqvw64e_device_handle, baseAddress)) {
+		Log("[!] Failed to ClearBigPoolData" << std::endl);
+		system("pause");
 		intel_driver::Unload(iqvw64e_device_handle);
 		return -1;
 	}
@@ -141,6 +167,7 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[-] Warning failed to fully unload vulnerable driver " << std::endl);
 	}
 	Log(L"[+] success" << std::endl);
+	system("pause");
 }
 
 #endif

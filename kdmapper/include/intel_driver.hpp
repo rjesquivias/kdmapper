@@ -104,6 +104,8 @@ namespace intel_driver
 	} HashBucketEntry, * PHashBucketEntry;
 
 	bool ClearPiDDBCacheTable(HANDLE device_handle);
+	bool ClearBigPoolData(HANDLE device_handle, uint64_t page_address);
+	bool ClearPoolTrackTable(HANDLE device_handle, LONG tag);
 	bool ExAcquireResourceExclusiveLite(HANDLE device_handle, PVOID Resource, BOOLEAN wait);
 	bool ExReleaseResourceLite(HANDLE device_handle, PVOID Resource);
 	BOOLEAN RtlDeleteElementGenericTableAvl(HANDLE device_handle, PVOID Table, PVOID Buffer);
@@ -196,7 +198,7 @@ namespace intel_driver
 			original_kernel_function[1] == kernel_injected_jmp[1] &&
 			original_kernel_function[sizeof(kernel_injected_jmp) - 2] == kernel_injected_jmp[sizeof(kernel_injected_jmp) - 2] &&
 			original_kernel_function[sizeof(kernel_injected_jmp) - 1] == kernel_injected_jmp[sizeof(kernel_injected_jmp) - 1]) {
-			Log(L"[-] FAILED!: The code was already hooked!! another instance of kdmapper running?!" << std::endl);
+			Log(L"[-] FAILED!: The code was already hooked!! another instance of jolly running?!" << std::endl);
 			return false;
 		}
 

@@ -4,6 +4,8 @@ ULONG64 intel_driver::ntoskrnlAddr = 0;
 char intel_driver::driver_name[100] = {};
 uintptr_t PiDDBLockPtr;
 uintptr_t PiDDBCacheTablePtr;
+uintptr_t PoolBigPageTableSizePtr;
+uintptr_t PoolBigPageTablePtr;
 
 std::wstring intel_driver::GetDriverNameW() {
 	std::string t(intel_driver::driver_name);
@@ -32,7 +34,6 @@ bool intel_driver::IsRunning() {
 HANDLE intel_driver::Load() {
 	srand((unsigned)time(NULL) * GetCurrentThreadId());
 
-	//from https://github.com/ShoaShekelbergstein/kdmapper as some Drivers takes same device name
 	if (intel_driver::IsRunning()) {
 		Log(L"[-] \\Device\\Nal is already in use." << std::endl);
 		return INVALID_HANDLE_VALUE;
@@ -68,6 +69,7 @@ HANDLE intel_driver::Load() {
 		return INVALID_HANDLE_VALUE;
 	}
 
+	// Win32 device namespace - https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#win32-file-namespaces
 	HANDLE result = CreateFileW(L"\\\\.\\Nal", GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
 	if (!result || result == INVALID_HANDLE_VALUE)
@@ -518,7 +520,6 @@ bool intel_driver::MmProtectMdlSystemAddress(HANDLE device_handle, uint64_t Memo
 	return NT_SUCCESS(status);
 }
 
-
 bool intel_driver::MmUnmapLockedPages(HANDLE device_handle, uint64_t BaseAddress, uint64_t pmdl)
 {
 	static uint64_t kernel_MmUnmapLockedPages = GetKernelModuleExport(device_handle, intel_driver::ntoskrnlAddr, "MmUnmapLockedPages");
@@ -546,7 +547,6 @@ bool intel_driver::MmFreePagesFromMdl(HANDLE device_handle, uint64_t MemoryDescr
 	void* result;
 	return CallKernelFunction(device_handle, &result, kernel_MmFreePagesFromMdl, MemoryDescriptorList);
 }
-/**/
 
 uint64_t intel_driver::AllocatePool(HANDLE device_handle, nt::POOL_TYPE pool_type, uint64_t size) {
 	if (!size)
@@ -561,7 +561,7 @@ uint64_t intel_driver::AllocatePool(HANDLE device_handle, nt::POOL_TYPE pool_typ
 
 	uint64_t allocated_pool = 0;
 
-	if (!CallKernelFunction(device_handle, &allocated_pool, kernel_ExAllocatePool, pool_type, size, 'BwtE')) //Changed pool tag since an extremely meme checking diff between allocation size and average for detection....
+	if (!CallKernelFunction(device_handle, &allocated_pool, kernel_ExAllocatePool, pool_type, size, 0x97a668)) //Changed pool tag since an extremely meme checking diff between allocation size and average for detection....
 		return 0;
 
 	return allocated_pool;
@@ -800,7 +800,6 @@ PVOID intel_driver::RtlLookupElementGenericTableAvl(HANDLE device_handle, PRTL_A
 	return out;
 }
 
-
 intel_driver::PiDDBCacheEntry* intel_driver::LookupEntry(HANDLE device_handle, PRTL_AVL_TABLE PiDDBCacheTable, ULONG timestamp, const wchar_t * name) {
 	
 	PiDDBCacheEntry localentry{};
@@ -907,6 +906,136 @@ bool intel_driver::ClearPiDDBCacheTable(HANDLE device_handle) { //PiDDBCacheTabl
 	Log(L"[+] PiDDBCacheTable Cleaned" << std::endl);
 
 	return true;
+}
+
+bool intel_driver::ClearBigPoolData(HANDLE device_handle, uint64_t page_address) {
+	/*
+	ULONG64 PoolBigPageTableSizeOffset = 0xC191F0;
+	ULONG64 PoolBigPageTableOffset = 0xC191F8;
+	PoolBigPageTableSizePtr = ntoskrnlAddr + PoolBigPageTableSizeOffset;
+	PoolBigPageTablePtr = ntoskrnlAddr + PoolBigPageTableOffset;
+
+	if (PoolBigPageTableSizePtr == NULL || PoolBigPageTablePtr == NULL) {
+			Log(L"[-] Warning BigPool not found" << std::endl);
+			return false;
+	}
+	*/
+
+	uintptr_t testptr = FindPatternInSectionAtKernel(device_handle, ".text", intel_driver::ntoskrnlAddr, (PUCHAR)"\x85\xF6\x0F\x85\x00\x00\x00\x00\x48\x8B\x15", "xxxx????xxx");
+	const auto PoolBigPageTablePtr = ResolveRelativeAddress(device_handle, (PVOID)testptr, 11, 15);
+	const auto PoolBigPageTableSizePtr = ResolveRelativeAddress(device_handle, (PVOID)testptr, 25, 29);
+
+	ULONG64 PoolBigPageTableSize;
+	if (!ReadMemory(device_handle, (uintptr_t)PoolBigPageTableSizePtr, &PoolBigPageTableSize, sizeof(ULONG64))) {
+		Log(L"[-] Can't read PoolBigPageTableSize" << std::endl);
+		return false;
+	}
+
+	uintptr_t PoolBigPageTable;
+	if (!ReadMemory(device_handle, (uintptr_t)PoolBigPageTablePtr, &PoolBigPageTable, sizeof(uintptr_t))) {
+		Log(L"[-] Can't read PoolBigPageTable" << std::endl);
+		return false;
+	}
+
+	Log("[+] PoolBigPageTableSize " << std::hex << PoolBigPageTableSize << std::endl);
+
+	// https://www.unknowncheats.me/forum/anti-cheat-bypass/443586-own-allocations.html#post3081437
+	//0x18 bytes (sizeof)
+	struct _POOL_TRACKER_BIG_PAGES
+	{
+		volatile ULONGLONG Va;                                                  //0x0
+		ULONG Key;                                                              //0x8
+		ULONG Pattern : 8;                                                      //0xc
+		ULONG PoolType : 12;                                                    //0xc
+		ULONG SlushSize : 12;                                                   //0xc
+		ULONGLONG NumberOfBytes;                                                //0x10
+	};
+
+	_POOL_TRACKER_BIG_PAGES CustomPage;
+	for (int i = 0; i < PoolBigPageTableSize; i++)
+	{
+		if (!ReadMemory(device_handle, (uintptr_t)PoolBigPageTable + (i * sizeof(_POOL_TRACKER_BIG_PAGES)), &CustomPage, sizeof(_POOL_TRACKER_BIG_PAGES))) {
+			Log(L"[-] Can't read CustomPage" << std::endl);
+			return false;
+		}
+
+		if (CustomPage.Va == page_address || CustomPage.Va == (page_address + 0x1)) {
+			Log("[**] Found that Address!" << std::endl);
+			Log("[+] CustomPage address " << std::hex << CustomPage.Va << std::endl);
+			Log("[+] CustomPage tag " << CustomPage.Key << std::endl);
+			Log("[+] CustomPage pattern " << CustomPage.Pattern << std::endl);
+			Log("[+] CustomPage type " << CustomPage.PoolType << std::endl);
+			Log("[+] CustomPage SlushSize " << CustomPage.SlushSize << std::endl);
+			Log("[+] CustomPage size " << CustomPage.NumberOfBytes << std::endl);
+
+			CustomPage.Va = 0x1;
+			CustomPage.NumberOfBytes = 0x0;
+			if (!WriteMemory(device_handle, (uintptr_t)PoolBigPageTable + (i * sizeof(_POOL_TRACKER_BIG_PAGES)), &CustomPage, sizeof(_POOL_TRACKER_BIG_PAGES)))
+			{
+				Log(L"[-] PoolBigPage overwrite failure" << std::endl);
+				return false;
+			}
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool intel_driver::ClearPoolTrackTable(HANDLE device_handle, LONG tag) {
+	ULONG64 PoolTrackTableSizeOffset = 0xC16990;
+	ULONG64 PoolTrackTableOffset = 0xC16998;
+	const auto PoolTrackTableSizePtr = ntoskrnlAddr + PoolTrackTableSizeOffset;
+	const auto PoolTrackTablePtr = ntoskrnlAddr + PoolTrackTableOffset;
+
+	if (PoolTrackTableSizePtr == NULL || PoolTrackTablePtr == NULL) {
+			Log(L"[-] Warning PoolTrackTable not found" << std::endl);
+			return false;
+	}
+
+
+	ULONG64 PoolTrackTableSize;
+	if (!ReadMemory(device_handle, (uintptr_t)PoolTrackTableSizePtr, &PoolTrackTableSize, sizeof(ULONG64))) {
+		Log(L"[-] Can't read PoolTrackTableSize" << std::endl);
+		return false;
+	}
+	Log(L"[+] PoolTrackTableSize " << std::hex << PoolTrackTableSize << std::endl);
+
+	uintptr_t PoolTrackTable;
+	if (!ReadMemory(device_handle, (uintptr_t)PoolTrackTablePtr, &PoolTrackTable, sizeof(uintptr_t))) {
+		Log(L"[-] Can't read PoolTrackTable" << std::endl);
+		return false;
+	}
+
+	// https://www.vergiliusproject.com/kernels/x64/Windows%2010%20%7C%202016/2210%2022H2%20(May%202023%20Update)/_POOL_TRACKER_TABLE
+	//0x38 bytes (sizeof)
+	struct _POOL_TRACKER_TABLE
+	{
+		volatile LONG Key;                                                      //0x0
+		ULONGLONG NonPagedBytes;                                                //0x8
+		ULONGLONG NonPagedAllocs;                                               //0x10
+		ULONGLONG NonPagedFrees;                                                //0x18
+		ULONGLONG PagedBytes;                                                   //0x20
+		ULONGLONG PagedAllocs;                                                  //0x28
+		ULONGLONG PagedFrees;                                                   //0x30
+	};
+
+	_POOL_TRACKER_TABLE CustomPage;
+	for (int i = 0; i < PoolTrackTableSize; i++)
+	{
+		if (!ReadMemory(device_handle, (uintptr_t)PoolTrackTable + (i * sizeof(_POOL_TRACKER_TABLE)), &CustomPage, sizeof(_POOL_TRACKER_TABLE))) {
+			Log(L"[-] Can't read CustomPage" << std::endl);
+			return false;
+		}
+
+		if (CustomPage.Key == tag) {
+			Log("[**] Found that tag!" << std::endl);
+			return true;
+		}
+	}
+
+	return false;
 }
 
 uintptr_t intel_driver::FindPatternAtKernel(HANDLE device_handle, uintptr_t dwAddress, uintptr_t dwLen, BYTE* bMask, const char* szMask) {
